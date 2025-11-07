@@ -36,4 +36,4 @@ packaging_bundle/
 !sample_map.csv
 
 # Keep final installer
-!Output/ModbusSlaveSetup.exe
+!packaging/Output/ModbusSlaveSetup.exe
