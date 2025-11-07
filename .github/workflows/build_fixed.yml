@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,20 +40,16 @@ jobs:
           pyinstaller --onefile --name modbus-sim src/modbus_sim.py
 
       - name: List dist
-        run: |
-          dir dist
+        run: dir dist
 
       - name: Install Inno Setup
-        run: |
-          choco install innosetup --yes --no-progress
+        run: choco install innosetup --yes --no-progress
 
       - name: Build Installer (Inno Setup)
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            throw "ISCC.exe not found at $iscc"
-          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
           & "$iscc" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed." }
 
@@ -64,7 +60,7 @@ jobs:
           path: |
             dist/modbus-sim-gui.exe
             dist/modbus-sim.exe
-            Output/ModbusSlaveSetup.exe
+            packaging/Output/ModbusSlaveSetup.exe
 
       - name: Publish GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
@@ -73,5 +69,5 @@ jobs:
           files: |
             dist/modbus-sim-gui.exe
             dist/modbus-sim.exe
-            Output/ModbusSlaveSetup.exe
+            packaging/Output/ModbusSlaveSetup.exe
           generate_release_notes: true
