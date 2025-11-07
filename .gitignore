@@ -13,7 +13,6 @@ modbus-sim-gui.exe
 modbus-sim.exe
 
 # Inno Setup
-Output/
 Output/*.tmp
 Output/*.log
 *.iss.tmp
