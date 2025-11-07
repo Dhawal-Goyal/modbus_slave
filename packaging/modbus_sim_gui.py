@@ -17,6 +17,8 @@ import re
 import logging
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import csv, io, re
+from typing import Dict, List, Tuple
 
 from typing import Dict, List, Tuple, Optional
 
@@ -184,45 +186,179 @@ class ReadOnlySparseHR(ModbusSparseDataBlock):
             if a not in self.values:
                 return False
         return True
+    
+    
+# -------- CSV tolerant helpers --------
+POSSIBLE_ENCODINGS = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+
+def _open_text_any(path: str):
+    """Open a text file trying multiple encodings, returning a file object."""
+    last_err = None
+    for enc in POSSIBLE_ENCODINGS:
+        try:
+            return open(path, "r", encoding=enc, newline="")
+        except UnicodeDecodeError as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    # If we get here for some reason, fall back to binary + latin-1 decode
+    return io.TextIOWrapper(open(path, "rb"), encoding="latin-1", newline="")
+
+def _norm(s: str) -> str:
+    """Normalize header/field names: strip spaces, strip BOM, lowercase."""
+    if s is None:
+        return ""
+    return s.strip().lstrip("\ufeff").lower()
+
+def _parse_int(s: str) -> int:
+    """Parse decimal or 0xHEX."""
+    s = s.strip()
+    if s.lower().startswith("0x"):
+        return int(s, 16)
+    return int(s, 10)
+
+def _parse_address(raw: str, four_base: int) -> int:
+    """
+    Accept 0xHEX, decimal, or 4xxxx family.
+    If 4xxxx (e.g., 40100), convert to zero-based by subtracting four_base.
+    """
+    raw = raw.strip()
+    if raw.lower().startswith("0x"):
+        return int(raw, 16)
+    n = int(raw, 10)
+    # Treat 4xxxx family specially
+    if n >= 40000:
+        return n - four_base
+    return n
+# --------------------------------------
 
 # -------------------
 # CSV → memory mapping
 # -------------------
 import csv
-def load_csv_map(csv_path: str, four_base: int, defaults: Dict[str, str]):
+def load_csv_map(csv_path: str, four_base: int, endian_cfg: Dict[str, str]) -> Tuple[Dict[int, int], Dict]:
+    """
+    Reads a CSV describing holding registers and returns:
+      - mapping: {register_address: 16bit_value}
+      - meta:    dict with details (e.g., rows_count)
+
+    CSV tolerated encodings: utf-8, utf-8-sig, cp1252, latin-1
+    Header names are normalized (strip/BOM/lowercase).
+    Required columns: address, type, value
+    Optional columns: len, order_code, byte_order, word_order, pad, comment
+    """
     mapping: Dict[int, int] = {}
-    log_lines: List[str] = []
-    with open(csv_path, "r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = [h.lower() for h in (reader.fieldnames or [])]
-        for required in ["address","type","value"]:
-            if required not in headers:
-                raise ValueError(f"CSV missing required column: {required}")
-        rownum = 1
-        for raw in reader:
-            rownum += 1
-            row = {k.lower(): (v.strip() if isinstance(v, str) else v) for k, v in raw.items()}
+    meta = {"rows": 0, "errors": []}
 
-            addr = parse_address(row["address"], four_base=four_base)
-            dtype = row["type"].lower()
-            value = row["value"]
-            length_chars = int(row["len"]) if row.get("len") else None
-            byte_order = row.get("byte_order") or None
-            word_order = row.get("word_order") or None
-            order_code = row.get("order_code") or None
-            pad = row.get("pad") or None
-            comment = row.get("comment") or None
+    with _open_text_any(csv_path) as f:
+        rdr = csv.DictReader(f)
+        # Normalize headers (handle BOM, casing, spaces)
+        if not rdr.fieldnames:
+            raise ValueError("CSV has no header row.")
+        rdr.fieldnames = [_norm(h) for h in rdr.fieldnames]
 
-            mr = MapRow(addr, dtype, value, length_chars, byte_order, word_order, order_code, pad, comment)
-            regs = pack_row_to_registers(mr, defaults)
+        required = {"address", "type", "value"}
+        missing = required.difference(set(rdr.fieldnames))
+        if missing:
+            raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
 
-            for i, reg in enumerate(regs):
-                a = addr + i
-                if a in mapping:
-                    raise ValueError(f"Overlap at address {a} (row {rownum})")
-            for i, reg in enumerate(regs):
-                mapping[addr + i] = reg & 0xFFFF
-    return mapping, log_lines
+        # Local helpers for 32-bit ordering
+        def _split32(v: int, order: str) -> List[int]:
+            """Return two 16-bit words according to ABCD/BADC/CDAB/DCBA."""
+            v = v & 0xFFFFFFFF
+            hi = (v >> 16) & 0xFFFF
+            lo = v & 0xFFFF
+            if order == "abcd":   # hi then lo (big-endian)
+                return [hi, lo]
+            if order == "badc":   # bytes swapped within words
+                a = ((hi >> 8) & 0xFF) | ((hi & 0xFF) << 8)
+                b = ((lo >> 8) & 0xFF) | ((lo & 0xFF) << 8)
+                return [a, b]
+            if order == "cdab":   # word swap
+                return [lo, hi]
+            if order == "dcba":   # word swap + byte swap
+                a = ((lo >> 8) & 0xFF) | ((lo & 0xFF) << 8)
+                b = ((hi >> 8) & 0xFF) | ((hi & 0xFF) << 8)
+                return [a, b]
+            # default: ABCD
+            return [hi, lo]
+
+        for row in rdr:
+            meta["rows"] += 1
+            row = { _norm(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() }
+
+            try:
+                addr0 = _parse_address(row["address"], four_base)
+                typ   = row.get("type","").lower()
+                val_s = row.get("value","")
+
+                # Optional fields
+                length = int(row.get("len") or 0) if row.get("len") else 0
+                order_code = (row.get("order_code") or "").strip().lower()
+                byte_order = (row.get("byte_order") or endian_cfg.get("byte","big")).strip().lower()
+                word_order = (row.get("word_order") or endian_cfg.get("word","big")).strip().lower()
+                pad = (row.get("pad") or "").strip().lower()
+
+                # Normalize 32-bit ordering shortcut
+                if order_code in {"abcd","badc","cdab","dcba"}:
+                    order32 = order_code
+                else:
+                    # Derive from byte/word if no explicit code
+                    # Simplified mapping: big/big -> abcd, little/big -> badc, big/little -> cdab, little/little -> dcba
+                    bw = (byte_order, word_order)
+                    order32 = {"bigbig":"abcd","littlebig":"badc","biglittle":"cdab","littlelittle":"dcba"}.get(
+                        f"{bw[0]}{bw[1]}", "abcd"
+                    )
+
+                # Expand types
+                if typ in ("uint16","int16"):
+                    v = int(val_s, 10)
+                    if typ == "int16" and v < 0:
+                        v = (v + (1 << 16)) & 0xFFFF
+                    mapping[addr0] = v & 0xFFFF
+
+                elif typ in ("uint32","int32"):
+                    v = int(val_s, 10)
+                    if typ == "int32" and v < 0:
+                        v = (v + (1 << 32)) & 0xFFFFFFFF
+                    w0, w1 = _split32(v, order32)
+                    mapping[addr0] = w0 & 0xFFFF
+                    mapping[addr0 + 1] = w1 & 0xFFFF
+
+                elif typ == "ascii":
+                    # two chars per register
+                    s = val_s
+                    n_chars = int(row.get("len") or 0) or len(s)
+                    if pad == "space":
+                        s = s.ljust(n_chars)[:n_chars]
+                    elif pad == "null":
+                        s = s.ljust(n_chars, "\x00")[:n_chars]
+                    else:
+                        s = s[:n_chars]
+                    # pack into 16-bit words
+                    i = 0
+                    reg = addr0
+                    while i < len(s):
+                        c1 = ord(s[i])
+                        c2 = ord(s[i+1]) if i+1 < len(s) else 0
+                        word = ((c1 & 0xFF) << 8) | (c2 & 0xFF)
+                        mapping[reg] = word
+                        reg += 1
+                        i += 2
+
+                else:
+                    raise ValueError(f"Unsupported type '{typ}' at row {meta['rows']}")
+
+            except Exception as e:
+                meta["errors"].append(f"Row {meta['rows']}: {e}")
+
+    # Optional: you can decide to raise if there were row errors
+    if meta["errors"]:
+        # Raise a compact error; or log and continue depending on your philosophy
+        raise ValueError("CSV parse errors:\n" + "\n".join(meta["errors"][:10]))
+
+    return mapping, meta
+
 
 # -----------------------
 # Server runner (threaded)

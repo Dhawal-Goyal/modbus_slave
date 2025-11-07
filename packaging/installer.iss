@@ -1,4 +1,3 @@
-\
 ; Inno Setup installer for Modbus RTU Slave Simulator (GUI + optional CLI)
 ; Requires Inno Setup 6.x (https://jrsoftware.org/isinfo.php)
 #define MyAppName "Modbus RTU Slave Simulator"
