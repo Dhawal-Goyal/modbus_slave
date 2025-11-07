@@ -1,4 +1,4 @@
-name: Build Windows EXE and Installer
+name: Build Windows EXE and Installer (packaging folder)
 
 on:
   push:
@@ -25,22 +25,24 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install Python deps
+      - name: Install Python deps (from packaging/requirements.txt)
         run: |
           python -m pip install --upgrade pip
           pip install -r packaging/requirements.txt
           pip install pyinstaller
 
-      - name: Build GUI EXE (PyInstaller)
+      - name: Build GUI EXE (PyInstaller, in packaging/)
+        working-directory: packaging
         run: |
-          pyinstaller --onefile --windowed --name modbus-sim-gui src/modbus_sim_gui.py
+          pyinstaller --onefile --windowed --name modbus-sim-gui modbus_sim_gui.py
 
-      - name: Build CLI EXE (PyInstaller)
+      - name: Build CLI EXE (PyInstaller, in packaging/)
+        working-directory: packaging
         run: |
-          pyinstaller --onefile --name modbus-sim src/modbus_sim.py
+          pyinstaller --onefile --name modbus-sim modbus_sim.py
 
       - name: List dist
-        run: dir dist
+        run: dir packaging/dist
 
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
@@ -58,8 +60,8 @@ jobs:
         with:
           name: windows-build
           path: |
-            dist/modbus-sim-gui.exe
-            dist/modbus-sim.exe
+            packaging/dist/modbus-sim-gui.exe
+            packaging/dist/modbus-sim.exe
             packaging/Output/ModbusSlaveSetup.exe
 
       - name: Publish GitHub Release (on tag)
@@ -67,7 +69,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/modbus-sim-gui.exe
-            dist/modbus-sim.exe
+            packaging/dist/modbus-sim-gui.exe
+            packaging/dist/modbus-sim.exe
             packaging/Output/ModbusSlaveSetup.exe
           generate_release_notes: true
