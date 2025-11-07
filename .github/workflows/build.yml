@@ -1,0 +1,77 @@
+name: Build Windows EXE and Installer
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ "v*", "V*" ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packaging/requirements.txt
+          pip install pyinstaller
+
+      - name: Build GUI EXE (PyInstaller)
+        run: |
+          pyinstaller --onefile --windowed --name modbus-sim-gui src/modbus_sim_gui.py
+
+      - name: Build CLI EXE (PyInstaller)
+        run: |
+          pyinstaller --onefile --name modbus-sim src/modbus_sim.py
+
+      - name: List dist
+        run: |
+          dir dist
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --yes --no-progress
+
+      - name: Build Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC.exe not found at $iscc"
+          }
+          & "$iscc" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed." }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            dist/modbus-sim-gui.exe
+            dist/modbus-sim.exe
+            Output/ModbusSlaveSetup.exe
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/modbus-sim-gui.exe
+            dist/modbus-sim.exe
+            Output/ModbusSlaveSetup.exe
+          generate_release_notes: true

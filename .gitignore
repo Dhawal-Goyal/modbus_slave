@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec
+modbus-sim-gui.exe
+modbus-sim.exe
+
+# Inno Setup
+Output/
+Output/*.tmp
+Output/*.log
+*.iss.tmp
+
+# Packaging
+packaging_bundle.zip
+packaging_bundle/
+
+# Logs
+*.log
+*.tmp
+*.bak
+
+# IDE
+.vscode/
+.idea/
+
+# CSV: keep sample_map.csv
+*.csv
+!sample_map.csv
+
+# Keep final installer
+!ModbusSlaveSetup.exe

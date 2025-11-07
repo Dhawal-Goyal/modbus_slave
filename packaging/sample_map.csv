@@ -1,0 +1,5 @@
+address,type,value,len,order_code,byte_order,word_order,pad,comment
+40001,uint16,1234,,,,,,"Example"
+40002,int32,-1000,,BADC,,,, "Signed 32-bit"
+120,ascii,INVERTER-A,12,,, ,space,"Name padded to 12"
+40100,uint32,305419896,,CDAB,,,, "0x12345678 as u32"
