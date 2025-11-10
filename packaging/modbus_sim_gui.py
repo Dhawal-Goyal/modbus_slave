@@ -375,13 +375,11 @@ class ServerThread(threading.Thread):
 
     def run(self):
         try:
-            mapping, _ = load_csv_map(self.params['csv_path'], self.params['four_base'], {
-                "byte": self.params['byte_order'],
-                "word": self.params['word_order'],
-            })
-            on_read = (lambda addr, cnt: self.log_queue.put(("DEBUG", f"READ HR[{addr}] x{cnt}"))) if self.params.get('log_reads') else None
-            block = ReadOnlySparseHR(mapping, strict_gaps=self.params['strict_gaps'], on_read=on_read)
-            store = ModbusSlaveContext(hr=block, di=None, co=None, ir=None, zero_mode=True)
+            hr_map, ir_map, _ = load_csv_maps_from_single(self.params["csv_path"], self.params["four_base"], {"byte": self.params["byte_order"], "word": self.params["word_order"]})
+            on_read = (lambda addr, cnt: self.log_queue.put(("DEBUG", f"READ HR[{addr}] x{cnt}"))) if self.params.get("log_reads") else None
+            hr_block = ReadOnlySparseHR(hr_map, strict_gaps=self.params["strict_gaps"], on_read=on_read)
+            ir_block = ReadOnlySparseHR(ir_map, strict_gaps=self.params["strict_gaps"], on_read=None)
+            store = ModbusSlaveContext(hr=hr_block, ir=ir_block, di=None, co=None, zero_mode=True)
 
             # Match CLI: bind to specific unit id via {slave: store}, single=False
             context = ModbusServerContext(slaves={self.params['slave']: store}, single=False)
@@ -522,9 +520,9 @@ class ModbusGUI(tk.Tk):
         toolbar = ttk.Frame(mapfrm); toolbar.pack(fill="x", pady=4)
         ttk.Button(toolbar, text="Load/Refresh from CSV", command=self._load_map_preview).pack(side="left", padx=4)
 
-        cols = ("address","value_dec","value_hex")
+        cols = ("table","address","value_dec","value_hex")
         self.tree_map = ttk.Treeview(mapfrm, columns=cols, show="headings")
-        for c, w in zip(cols, (120, 160, 160)):
+        for c, w in zip(cols, (80, 120, 160, 160)):
             self.tree_map.heading(c, text=c.replace("_"," ").title())
             self.tree_map.column(c, width=w, anchor="center")
         self.tree_map.pack(fill="both", expand=True)
@@ -689,17 +687,15 @@ class ModbusGUI(tk.Tk):
             if not os.path.exists(params['csv_path']):
                 messagebox.showerror("CSV not found", f"CSV file not found: {params['csv_path']}")
                 return
-            mapping, _ = load_csv_map(params['csv_path'], params['four_base'], {
-                "byte": params['byte_order'], "word": params['word_order'],
-            })
+            hr_map, ir_map, _ = load_csv_maps_from_single(params["csv_path"], params["four_base"], {"byte": params["byte_order"], "word": params["word_order"]})
             # clear
             for i in self.tree_map.get_children():
                 self.tree_map.delete(i)
-            # populate (sorted by address)
-            for addr in sorted(mapping.keys()):
-                v = mapping[addr] & 0xFFFF
-                self.tree_map.insert("", "end", values=(addr, v, f"0x{v:04X}"))
-            self._append_log("INFO", f"Preview loaded: {len(mapping)} registers")
+            for lbl, mp in (("HR", hr_map), ("IR", ir_map)):
+                for addr in sorted(mp.keys()):
+                    v = mp[addr] & 0xFFFF
+                    self.tree_map.insert("", "end", values=(lbl, addr, v, f"0x{v:04X}"))
+            self._append_log("INFO", f"Preview loaded: HR={len(hr_map)} IR={len(ir_map)}")
         except Exception as e:
             messagebox.showerror("Preview error", str(e))
             self._append_log("ERROR", f"Preview error: {e}")
@@ -707,3 +703,160 @@ class ModbusGUI(tk.Tk):
 if __name__ == "__main__":
     app = ModbusGUI()
     app.mainloop()
+
+
+# -------- CSV tolerant helpers (extended for single CSV with FC column) --------
+POSSIBLE_ENCODINGS = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+
+def _open_text_any(path: str):
+    last_err = None
+    for enc in POSSIBLE_ENCODINGS:
+        try:
+            return open(path, "r", encoding=enc, newline="")
+        except UnicodeDecodeError as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    return io.TextIOWrapper(open(path, "rb"), encoding="latin-1", newline="")
+
+def _norm(s: str) -> str:
+    if s is None:
+        return ""
+    return s.strip().lstrip("\ufeff").lower()
+
+def _parse_address_any(raw: str, four_base: int) -> int:
+    raw = (raw or "").strip()
+    if raw.lower().startswith("0x"):
+        return int(raw, 16)
+    n = int(raw, 10)
+    if n >= 40000:
+        return n - four_base
+    return n
+
+
+def load_csv_maps_from_single(csv_path: str, four_base: int, endian_cfg: Dict[str, str]) -> Tuple[Dict[int,int], Dict[int,int], Dict]:
+    """
+    Read one CSV and split rows into:
+      - hr_map: Holding Registers (F03)
+      - ir_map: Input Registers   (F04)
+    Returns (hr_map, ir_map, meta)
+    """
+    hr_map: Dict[int, int] = {}
+    ir_map: Dict[int, int] = {}
+    meta = {"rows": 0, "errors": []}
+
+    def _split32(v: int, order: str) -> List[int]:
+        v = v & 0xFFFFFFFF
+        hi = (v >> 16) & 0xFFFF
+        lo = (v & 0xFFFF)
+        if order == "abcd":
+            return [hi, lo]
+        if order == "badc":
+            a = ((hi >> 8) & 0xFF) | ((hi & 0xFF) << 8)
+            b = ((lo >> 8) & 0xFF) | ((lo & 0xFF) << 8)
+            return [a, b]
+        if order == "cdab":
+            return [lo, hi]
+        if order == "dcba":
+            a = ((lo >> 8) & 0xFF) | ((lo & 0xFF) << 8)
+            b = ((hi >> 8) & 0xFF) | ((hi & 0xFF) << 8)
+            return [a, b]
+        return [hi, lo]
+
+    def _order32(byte_order: str, word_order: str, order_code: str) -> str:
+        oc = (order_code or "").strip().lower()
+        if oc in {"abcd","badc","cdab","dcba"}:
+            return oc
+        b = (byte_order or endian_cfg.get("byte","big")).strip().lower()
+        w = (word_order or endian_cfg.get("word","big")).strip().lower()
+        key = f"{b}{w}"
+        return {"bigbig":"abcd","littlebig":"badc","biglittle":"cdab","littlelittle":"dcba"}.get(key, "abcd")
+
+    def _which_map(fc_raw: str) -> str:
+        fc = _norm(fc_raw)
+        if fc in {"", "f03","03","3","hr","holding","holding registers"}:
+            return "hr"
+        if fc in {"f04","04","4","ir","input","input registers"}:
+            return "ir"
+        raise ValueError(f"Unknown fc value '{fc_raw}' (expect F03/HR or F04/IR)")
+
+    with _open_text_any(csv_path) as f:
+        rdr = csv.DictReader(f)
+        if not rdr.fieldnames:
+            raise ValueError("CSV has no header row.")
+        rdr.fieldnames = [_norm(h) for h in rdr.fieldnames]
+
+        required = {"address","type","value"}
+        missing = required.difference(set(rdr.fieldnames))
+        if missing:
+            raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
+
+        for row in rdr:
+            meta["rows"] += 1
+            row = { _norm(k): (v.strip() if isinstance(v,str) else v) for k,v in row.items() }
+
+            try:
+                which = _which_map(row.get("fc",""))
+                addr0 = _parse_address_any(row["address"], four_base)
+                typ   = (row.get("type","") or "").lower()
+                val_s = row.get("value","")
+
+                length    = int(row.get("len") or 0) if row.get("len") else 0
+                order_code= (row.get("order_code") or "").strip()
+                byte_order= (row.get("byte_order") or "").strip()
+                word_order= (row.get("word_order") or "").strip()
+                pad       = (row.get("pad") or "").strip().lower()
+
+                # Map byte/word to order32 (fallbacks use endian_cfg)
+                b = (byte_order or endian_cfg.get("byte","big")).strip().lower()
+                w = (word_order or endian_cfg.get("word","big")).strip().lower()
+                key = f"{b}{w}"
+                ord32 = {"bigbig":"abcd","littlebig":"badc","biglittle":"cdab","littlelittle":"dcba"}.get(key, "abcd")
+                oc = (order_code or "").strip().lower()
+                if oc in {"abcd","badc","cdab","dcba"}:
+                    ord32 = oc
+
+                target = hr_map if which == "hr" else ir_map
+
+                if typ in ("uint16","int16"):
+                    v = int(val_s, 10)
+                    if typ == "int16" and v < 0:
+                        v = (v + (1<<16)) & 0xFFFF
+                    target[addr0] = v & 0xFFFF
+
+                elif typ in ("uint32","int32"):
+                    v = int(val_s, 10)
+                    if typ == "int32" and v < 0:
+                        v = (v + (1<<32)) & 0xFFFFFFFF
+                    w0, w1 = _split32(v, ord32)
+                    target[addr0]   = w0 & 0xFFFF
+                    target[addr0+1] = w1 & 0xFFFF
+
+                elif typ == "ascii":
+                    s = val_s
+                    n = int(row.get("len") or 0) or len(s)
+                    if pad == "space":
+                        s = s.ljust(n)[:n]
+                    elif pad == "null":
+                        s = s.ljust(n, "\\x00")[:n]
+                    else:
+                        s = s[:n]
+                    i, reg = 0, addr0
+                    while i < len(s):
+                        c1 = ord(s[i])
+                        c2 = ord(s[i+1]) if i+1 < len(s) else 0
+                        target[reg] = ((c1 & 0xFF) << 8) | (c2 & 0xFF)
+                        reg += 1
+                        i += 2
+
+                else:
+                    raise ValueError(f"Unsupported type '{typ}' at row {meta['rows']}")
+
+            except Exception as e:
+                meta["errors"].append(f"Row {meta['rows']}: {e}")
+
+    if meta["errors"]:
+        raise ValueError("CSV parse errors:\\n" + "\\n".join(meta["errors"][:10]))
+
+    return hr_map, ir_map, meta
+

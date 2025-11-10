@@ -1,5 +1,7 @@
-address,type,value,len,order_code,byte_order,word_order,pad,comment
-40001,uint16,1234,,,,,,"Example"
-40002,int32,-1000,,BADC,,,, "Signed 32-bit"
-120,ascii,INVERTER-A,12,,, ,space,"Name padded to 12"
-40100,uint32,305419896,,CDAB,,,, "0x12345678 as u32"
+fc,address,type,value,len,order_code,byte_order,word_order,pad,comment
+F03,0x318,uint16,30,1,,,,,RTC-Second
+F03,0x319,uint16,45,1,,,,,RTC-Minute
+F03,0x31A,uint16,14,1,,,,,RTC-Hour
+F04,0x300,ascii,Solax12345,14,,,,,Serial Number (14)
+F04,0x307,ascii,Solax Energy,14,,,,,Factory Name (14)
+F04,0x30E,ascii,SLX-MOD200,14,,,,,Module Name (14)
